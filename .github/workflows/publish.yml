@@ -1,0 +1,83 @@
+name: Publish LiDAR tiles
+
+# The tiles live in a Release, not in Git. A Release cannot serve them to a browser,
+# because GitHub sends no CORS headers on release downloads, so Pages does that.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # Bump to rebuild, for a new source or a change to the build.
+  RELEASE: bc-093g086-v1
+  ARCHIVE: bc-093g086-ept.tar
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore tiles from the release
+        id: restore
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p site
+          if gh release download "$RELEASE" --pattern "$ARCHIVE" --dir "$RUNNER_TEMP"; then
+            tar -xf "$RUNNER_TEMP/$ARCHIVE" -C site
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install the tile builder
+        if: steps.restore.outputs.found != 'true'
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: environment.yml
+
+      - name: Build tiles from the checksummed source
+        if: steps.restore.outputs.found != 'true'
+        run: micromamba run -n pgmaps-lidar-data python prepare-lidar.py --output site/bc-093g086
+
+      - name: Keep the tiles in a release
+        if: steps.restore.outputs.found != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tar -cf "$RUNNER_TEMP/$ARCHIVE" -C site bc-093g086
+          gh release create "$RELEASE" "$RUNNER_TEMP/$ARCHIVE" \
+            --title "$RELEASE" \
+            --notes "EPT tiles for BC tile 093G086. Built by prepare-lidar.py from the checksummed source."
+
+      # Checks every tile against the index, whichever way the tiles arrived.
+      - name: Verify every tile
+        run: python3 prepare-lidar.py --output site/bc-093g086
+
+      - name: Add a landing page
+        run: |
+          cat > site/index.html <<'HTML'
+          <!doctype html><title>PGMaps LiDAR data</title>
+          <p>Point-cloud tiles for <a href="https://pgmaps.ahmadjalil.com/dev/lidar/">PGMaps LiDAR</a>.
+          HTML
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
